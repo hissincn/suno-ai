@@ -1,0 +1,20 @@
+# Node modules
+node_modules/
+
+# Compiled output
+dist/
+output/
+
+# Logs
+*.log
+
+# Environment variables
+.env
+
+# Editor directories and files
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# macOS
+.DS_Store
