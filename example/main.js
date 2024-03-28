@@ -1,4 +1,4 @@
-const { SunoAI } = require('../dist');
+const { SunoAI } = require('../src');
 
 async function main() {
   try {
@@ -14,27 +14,20 @@ async function main() {
     let limit = await suno.getLimitLeft();
     console.log(`${limit} songs left`);
 
-    // Save the generated songs to the output directory
-    const prompt = 'Generate a happy song about a internet company named Intercreat';
+    const prompt = 'Generate a very happy songs with a catchy melody and a positive message.';
+
+    // Generated songs with the given prompt
+    let songInfoA = await suno.generateSongs(prompt);
+
+    // OR Separate requests
+    let requestIds = await suno.generateToRequestIds(prompt);
+    let songInfoB = await suno.requestIdsToMetadata(requestIds);
+
+    // Save the generated songs
     const outputDir = './output';
-    await suno.saveSong(prompt, outputDir);
-
-    // OR,save it and Return Song Information in time!
-    const songB = await suno.saveSong(prompt, outputDir);
-
-    // OR, just return the song information.
-    const songC = await suno.generateSong(prompt);
-    console.log(songC);
-
-    /*
-    The song information like...
-      {
-        song_url,
-        song_name,
-        song_name_formatted, //already replace " " to "_"
-        lyric
-      }
-    */
+    await suno.saveSongs(songInfoA, outputDir);
+    await suno.saveSongs(songInfoB, outputDir);
+    // songInfoA is equivalent to songInfoB
 
     // Get all the generated songs
     const songs = await suno.getGeneratedSongs();

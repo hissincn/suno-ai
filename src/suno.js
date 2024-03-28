@@ -2,21 +2,44 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 
-const exchangeTokenUrlBase = 'https://clerk.suno.ai/v1/client/sessions/{sid}/tokens/api?_clerk_js_version=4.70.5';
 const baseUrl = 'https://studio-api.suno.ai';
-
+const maxRetryTimes = 20;
 class SunoAI {
     constructor(cookie) {
         this.cookie = cookie;
         this.headers = {
             "Accept-Encoding": "gzip, deflate, br",
-            "User-Agent": "123",
-            Cookie: cookie
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
+            "Cookie": cookie
         };
         this.sid = null;
         this.retryTime = 0;
         this.songInfoDict = {};
-        this.nowData = {};
+
+        // Keep the token fresh
+        this.authUpdateTime = null;
+        axios.interceptors.request.use(async (config) => {
+            if (config.url.startsWith(baseUrl)) {
+                if (!this.authUpdateTime || Date.now() - this.authUpdateTime > 45000) {
+                    await this._renew();
+                }
+                config.headers = this.headers;
+            }
+            return config;
+        });
+        axios.interceptors.response.use(async (response) => {
+            if (response.config.url.startsWith(baseUrl) && response.data?.detail === 'Unauthorized') {
+                await this._renew();
+                // Retry the request with the new headers
+                response = await axios.request({
+                    ...response.config,
+                    headers: this.headers
+                });
+            }
+            return response;
+        });
+
+
     }
 
     async init() {
@@ -47,91 +70,37 @@ class SunoAI {
         }
     }
 
+    // For every session, authorization token is valid for 60s.
+    async _renew() {
+        try {
+            const tokenResponse = await axios.request({
+                method: 'POST',
+                url: `https://clerk.suno.ai/v1/client/sessions/${this.sid}/tokens/api?_clerk_js_version=4.70.5`,
+                headers: {
+                    Cookie: this.cookie
+                }
+            })
+            const tokenData = tokenResponse.data;
+            const token = tokenData?.jwt;
+            this.headers.Authorization = `Bearer ${token}`;
+            this.authUpdateTime = Date.now();
+        }
+        catch (e) {
+            console.error(e);
+            throw e;
+        }
+    }
+
     async getLimitLeft() {
         const response = await axios.request({
             method: 'GET',
-            url: `${baseUrl}/api/billing/info/`,
-            headers: this.headers
+            url: `${baseUrl}/api/billing/info/`
         })
         const data = response.data;
         return Math.floor(data.total_credits_left / 10);
     }
 
-    async _renew() {
-        const exchangeTokenUrl = exchangeTokenUrlBase.replace('{sid}', this.sid);
-        const tokenResponse = await axios.request({
-            method: 'POST',
-            url: exchangeTokenUrl,
-            headers: {
-                Cookie: this.cookie
-            }
-        })
-        const tokenData = tokenResponse.data;
-        const token = tokenData?.jwt;
-        this.headers.Authorization = `Bearer ${token}`;
-    }
-
-    _parseLyrics(data) {
-        const songName = data.title || '';
-        const mt = data.metadata;
-        if (!mt || !songName) {
-            return ['', ''];
-        }
-        const lyrics = mt.prompt.replace(/\[.*?\]/g, '');
-        return [songName, lyrics];
-    }
-
-    async _fetchSongsMetadata(ids) {
-        const [id1, id2] = ids.slice(0, 2);
-        const url = `${baseUrl}/api/feed/?ids=${id1}%2C${id2}`;
-        try {
-            const response = await axios.get(url, { headers: this.headers });
-            let data = response.data;
-
-            if (typeof data === 'object' && data.detail === 'Unauthorized') {
-                console.log('Token expired, renewing...');
-                this.retryTime += 1;
-                if (this.retryTime > 2) {
-                    const [songName, lyric] = this._parseLyrics(this.nowData[0]);
-                    this.songInfoDict.song_name = songName;
-                    this.songInfoDict.lyric = lyric;
-                    this.songInfoDict.song_url = `https://audiopipe.suno.ai/?item_id=${id1}`;
-                    console.log('will sleep 30 and try to download');
-                    await new Promise(resolve => setTimeout(resolve, 30000));
-                    return true;
-                }
-                await this._renew();
-                await new Promise(resolve => setTimeout(resolve, 5000));
-                return false;
-            } else if (!Array.isArray(data)) {
-                data = [data];
-            }
-
-            this.nowData = data;
-            for (const d of data) {
-                if (d.audio_url) {
-                    const [songName, lyric] = this._parseLyrics(d);
-                    this.songInfoDict.song_name = songName;
-                    this.songInfoDict.lyric = lyric;
-                    this.songInfoDict.song_url = d.audio_url;
-                    return true;
-                }
-            }
-            return false;
-        } catch (e) {
-            console.error(e);
-            console.log('Will sleep 45s and get the music url');
-            await new Promise(resolve => setTimeout(resolve, 45000));
-            const [songName, lyric] = this._parseLyrics(this.nowData[0]);
-            this.songInfoDict.song_name = songName;
-            this.songInfoDict.lyric = lyric;
-            this.songInfoDict.song_url = `https://audiopipe.suno.ai/?item_id=${ids[0]}`;
-            return true;
-        }
-    }
-
-    async getSongs(prompt, maxRetryTimes = 20) {
-        const url = `${baseUrl}/api/generate/v2/`;
+    async generateToRequestIds(prompt) {
         const payload = {
             gpt_description_prompt: prompt,
             mv: 'chirp-v3-0',
@@ -140,7 +109,7 @@ class SunoAI {
         };
 
         try {
-            const response = await axios.post(url, payload, { headers: this.headers });
+            const response = await axios.post(`${baseUrl}/api/generate/v2/`, payload);
             if (response.status !== 200) {
                 console.error(response.statusText);
                 throw new Error(`Error response ${response.status}`);
@@ -149,11 +118,32 @@ class SunoAI {
             const responseBody = response.data;
             const songsMetaInfo = responseBody.clips;
             const requestIds = songsMetaInfo.map(info => info.id);
-            console.log('Waiting for generating...');
+            console.log(requestIds);
+
+            return requestIds;
+        } catch (e) {
+            console.error(e);
+            throw e;
+        }
+    }
+
+    async requestIdsToMetadata(ids) {
+        const [id1, id2] = ids.slice(0, 2);
+
+        console.log('Waiting for generating...');
+
+        try {
+            // Retry if the song is not generated
             let retryTimes = 0;
             while (true) {
-                const songInfo = await this._fetchSongsMetadata(requestIds);
-                if (!songInfo) {
+                const response = await axios.get(`${baseUrl}/api/feed/?ids=${id1}%2C${id2}`);
+                let data = response?.data;
+
+                if (data[0]?.audio_url && data[1]?.audio_url) {
+                    console.log('Generated');
+                    return data;
+                }
+                else {
                     console.log('Generating...');
                     if (retryTimes > maxRetryTimes) {
                         throw new Error('Failed to generating song');
@@ -162,71 +152,82 @@ class SunoAI {
                         await new Promise(resolve => setTimeout(resolve, 5000));
                         retryTimes += 1;
                     }
-                } else {
-                    break;
                 }
             }
-            return this.songInfoDict;
+        } catch (e) {
+            console.error(e);
+        }
+    }
+
+    async generateSongs(prompt) {
+        try {
+            const requestIds = await this.generateToRequestIds(prompt);
+            const songsInfo = await this.fetchSongsMetadata(requestIds);
+            return songsInfo;
         } catch (e) {
             console.error(e);
             throw e;
         }
     }
 
-    async saveSong(prompt, outputDir) {
+    async saveSongs(songsInfo, outputDir) {
         try {
-            await this.getSongs(prompt);
-            const { song_name, lyric, song_url } = this.songInfoDict;
-
-            fs.mkdirSync(outputDir, { recursive: true });
-
-            console.log(song_url);
-            console.log("Waiting for song to download...");
-            const response = await axios.get(song_url, { responseType: 'stream' });
-            if (response.status !== 200) {
-                throw new Error('Could not download song');
+            // Create the output directory if it does not exist
+            if (!fs.existsSync(outputDir)) {
+                fs.mkdirSync(outputDir, { recursive: true });
             }
 
-            const mp3Path = path.join(outputDir, `${song_name.replace(' ', '_')}.mp3`);
-            const lrcPath = path.join(outputDir, `${song_name.replace(' ', '_')}.lrc`);
+            for (let i = 0; i < songsInfo.length; i++) {
+                let songInfo = songsInfo[i];
+                let title = songInfo.title;
+                let lyric = songInfo.metadata.prompt.replace(/\[.*?\]/g, '');
+                let audio_url = songInfo.audio_url;
+                let image_large_url = songInfo.image_large_url;
+                let fileName = `${title.replace(/ /g, '_')}_${i}`;
 
-            const fileStream = fs.createWriteStream(mp3Path);
-            response.data.pipe(fileStream);
+                console.log(`Saving ${fileName}`);
 
-            await new Promise((resolve, reject) => {
-                fileStream.on('finish', resolve);
-                fileStream.on('error', reject);
-            });
-            console.log("Song downloaded");
+                const jsonPath = path.join(outputDir, `${fileName}.json`);
+                const mp3Path = path.join(outputDir, `${fileName}.mp3`);
+                const lrcPath = path.join(outputDir, `${fileName}.lrc`);
+                const imagePath = path.join(outputDir, `${fileName}.png`);
 
-            fs.writeFileSync(lrcPath, `${song_name}\n\n${lyric}`, 'utf-8');
-            console.log("Lyric downloaded");
+                // Save the info
+                fs.writeFileSync(jsonPath, JSON.stringify(songInfo, null, 2), 'utf-8');
+                console.log("Info downloaded");
 
-            return {
-                song_url: song_url,
-                song_name: song_name,
-                song_name_formatted: song_name.replace(' ', '_'),
-                lyric: lyric
+                // Save the lyric
+                // ！！！！！！！waiting for processing
+                fs.writeFileSync(lrcPath, `${title}\n\n${lyric}`, 'utf-8');
+                console.log("Lyric downloaded");
+
+                // Save the cover image
+                const imageResponse = await axios.get(image_large_url, { responseType: 'stream' });
+                if (imageResponse.status !== 200) {
+                    throw new Error('Could not download image');
+                }
+                const imageFileStream = fs.createWriteStream(imagePath);
+                imageResponse.data.pipe(imageFileStream);
+                await new Promise((resolve, reject) => {
+                    imageFileStream.on('finish', resolve);
+                    imageFileStream.on('error', reject);
+                });
+                console.log("Cover image downloaded");
+
+                // Download the song
+                console.log("Song downloading...");
+                const response = await axios.get(audio_url, { responseType: 'stream' });
+                if (response.status !== 200) {
+                    throw new Error('Could not download song');
+                }
+                const fileStream = fs.createWriteStream(mp3Path);
+                response.data.pipe(fileStream);
+                await new Promise((resolve, reject) => {
+                    fileStream.on('finish', resolve);
+                    fileStream.on('error', reject);
+                });
+                console.log("Song downloaded");
             }
-
-        } catch (e) {
-            console.error(e);
-            throw e;
-        }
-    }
-
-    async generateSong(prompt) {
-        try {
-            await this.getSongs(prompt);
-            const { song_name, lyric, song_url } = this.songInfoDict;
-
-            return {
-                song_url: song_url,
-                song_name: song_name,
-                song_name_formatted: song_name.replace(' ', '_'),
-                lyric: lyric
-            }
-
         } catch (e) {
             console.error(e);
             throw e;
@@ -235,7 +236,7 @@ class SunoAI {
 
     async getGeneratedSongs() {
         try {
-            const response = await axios.get(`${baseUrl}/api/feed/`, { headers: this.headers });
+            const response = await axios.get(`${baseUrl}/api/feed/`);
             const data = response.data;
             return data;
         } catch (e) {
