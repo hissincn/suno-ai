@@ -286,6 +286,7 @@ class SunoAI {
             throw e;
         }
     }
+
 }
 
 module.exports = SunoAI;

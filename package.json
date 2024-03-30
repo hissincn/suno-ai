@@ -2,7 +2,7 @@
   "name": "suno-ai",
   "version": "1.0.0",
   "description": "Creat high quality songs from suno.ai by Javascript API.",
-  "main": "dist/main.js",
+  "main": "dist/index.js",
   "scripts": {
     "build": "webpack --mode=production",
     "test": "node dist/main.js"
