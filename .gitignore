@@ -4,6 +4,7 @@ node_modules/
 # Compiled output
 dist/
 output/
+example/test.js
 
 # Logs
 *.log

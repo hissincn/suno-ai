@@ -3,7 +3,8 @@ const fs = require('fs');
 const path = require('path');
 
 const baseUrl = 'https://studio-api.suno.ai';
-const maxRetryTimes = 20;
+const maxRetryTimes = 5;
+
 class SunoAI {
     constructor(cookie) {
         this.cookie = cookie;
@@ -14,11 +15,13 @@ class SunoAI {
         };
         this.sid = null;
         this.retryTime = 0;
-        this.songInfoDict = {};
 
         // Keep the token fresh
         this.authUpdateTime = null;
         axios.interceptors.request.use(async (config) => {
+            if (this.retryTime > maxRetryTimes) {
+                throw new Error('Fail to retry because of too many times.');
+            }
             if (config.url.startsWith(baseUrl)) {
                 if (!this.authUpdateTime || Date.now() - this.authUpdateTime > 45000) {
                     await this._renew();
@@ -27,19 +30,28 @@ class SunoAI {
             }
             return config;
         });
-        axios.interceptors.response.use(async (response) => {
-            if (response.config.url.startsWith(baseUrl) && response.data?.detail === 'Unauthorized') {
-                await this._renew();
-                // Retry the request with the new headers
-                response = await axios.request({
-                    ...response.config,
-                    headers: this.headers
-                });
+        axios.interceptors.response.use(
+            async (response) => {
+                if (response.config.url.startsWith(baseUrl) && response.data?.detail === 'Unauthorized') {
+                    this.retryTime += 1;
+                    response = await axios.request(response.config);
+                }
+                else {
+                    this.retryTime = 0;
+                }
+                return response;
+            },
+            async (error) => {
+                if (error.config.url.startsWith(baseUrl) && error.response?.status === 401) {
+                    this.retryTime += 1;
+                    error.response = await axios.request(error.config);
+                }
+                else {
+                    this.retryTime = 0;
+                }
+                return error.response;
             }
-            return response;
-        });
-
-
+        );
     }
 
     async init() {
@@ -100,14 +112,10 @@ class SunoAI {
         return Math.floor(data.total_credits_left / 10);
     }
 
-    async generateToRequestIds(prompt) {
-        const payload = {
-            gpt_description_prompt: prompt,
-            mv: 'chirp-v3-0',
-            prompt: '',
-            make_instrumental: false,
-        };
-
+    async getRequestIds(payload) {
+        if (!payload) {
+            throw new Error('Payload is required');
+        }
         try {
             const response = await axios.post(`${baseUrl}/api/generate/v2/`, payload);
             if (response.status !== 200) {
@@ -127,28 +135,35 @@ class SunoAI {
         }
     }
 
-    async requestIdsToMetadata(ids) {
-        const [id1, id2] = ids.slice(0, 2);
-
-        console.log('Waiting for generating...');
-
+    async getMetadata(ids) {
         try {
             // Retry if the song is not generated
             let retryTimes = 0;
+            const maxRetryTimes = 20;
+
+            let params = {};
+            if (ids && ids.length > 0) {
+                params.ids = ids.join(',');
+            }
+
             while (true) {
-                const response = await axios.get(`${baseUrl}/api/feed/?ids=${id1}%2C${id2}`);
+                const response = await axios.request({
+                    method: 'GET',
+                    url: `${baseUrl}/api/feed/`,
+                    params
+                });
+
                 let data = response?.data;
 
                 if (data[0]?.audio_url && data[1]?.audio_url) {
-                    console.log('Generated');
                     return data;
                 }
                 else {
-                    console.log('Generating...');
                     if (retryTimes > maxRetryTimes) {
                         throw new Error('Failed to generating song');
                     }
                     else {
+                        console.log('Retrying...');
                         await new Promise(resolve => setTimeout(resolve, 5000));
                         retryTimes += 1;
                     }
@@ -159,10 +174,10 @@ class SunoAI {
         }
     }
 
-    async generateSongs(prompt) {
+    async generateSongs(payload) {
         try {
-            const requestIds = await this.generateToRequestIds(prompt);
-            const songsInfo = await this.fetchSongsMetadata(requestIds);
+            const requestIds = await this.getRequestIds(payload);
+            const songsInfo = await this.getMetadata(requestIds);
             return songsInfo;
         } catch (e) {
             console.error(e);
@@ -234,11 +249,38 @@ class SunoAI {
         }
     }
 
-    async getGeneratedSongs() {
+    async getAllSongs() {
         try {
-            const response = await axios.get(`${baseUrl}/api/feed/`);
-            const data = response.data;
+            const data = await this.getMetadata();
             return data;
+        } catch (e) {
+            console.error(e);
+            throw e;
+        }
+    }
+
+    async generateLyrics(prompt) {
+        try {
+            const requestId = await axios.request({
+                method: 'POST',
+                url: `${baseUrl}/api/generate/lyrics/`,
+                data: { prompt }
+            })
+            let id = requestId?.data?.id;
+            while (true) {
+                const response = await axios.request({
+                    method: 'GET',
+                    url: `${baseUrl}/api/generate/lyrics/${id}`,
+                })
+                let data = response?.data;
+                if (data?.status==='complete') {
+                    return data;
+                }
+                else {
+                    // console.log('Retrying...');
+                    await new Promise(resolve => setTimeout(resolve, 300));
+                }
+            }
         } catch (e) {
             console.error(e);
             throw e;
