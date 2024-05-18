@@ -6,14 +6,14 @@ const baseUrl = 'https://studio-api.suno.ai';
 const maxRetryTimes = 5;
 
 class SunoAI {
-    constructor(cookie) {
+    constructor(sid, cookie) {
         this.cookie = cookie;
         this.headers = {
             "Accept-Encoding": "gzip, deflate, br",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
             "Cookie": cookie
         };
-        this.sid = null;
+        this.sid = sid;
         this.retryTime = 0;
 
         // Keep the token fresh
@@ -56,24 +56,6 @@ class SunoAI {
 
     async init() {
         try {
-            const response = await axios.request({
-                method: 'GET',
-                url: 'https://clerk.suno.ai/v1/client',
-                params: { _clerk_js_version: '4.70.5' },
-                headers: {
-                    Cookie: this.cookie
-                }
-            })
-            const data = response.data;
-            const r = data.response;
-            let sid;
-            if (r) {
-                sid = r.last_active_session_id;
-            }
-            if (!sid) {
-                throw new Error('Failed to get session id');
-            }
-            this.sid = sid;
             await this._renew();
         }
         catch (e) {
