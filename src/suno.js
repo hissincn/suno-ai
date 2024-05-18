@@ -69,7 +69,7 @@ class SunoAI {
         try {
             const tokenResponse = await axios.request({
                 method: 'POST',
-                url: `https://clerk.suno.ai/v1/client/sessions/${this.sid}/tokens/api?_clerk_js_version=4.70.5`,
+                url: `https://clerk.suno.com/v1/client/sessions/${this.sid}/tokens?_clerk_js_version=4.72.4`,
                 headers: {
                     Cookie: this.cookie
                 }
